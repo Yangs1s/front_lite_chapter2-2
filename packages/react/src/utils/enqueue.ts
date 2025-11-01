@@ -6,6 +6,7 @@ import type { AnyFunction } from "../types";
  */
 export const enqueue = (callback: () => void) => {
   // 여기를 구현하세요.
+  queueMicrotask(callback);
 };
 
 /**
@@ -15,5 +16,15 @@ export const enqueue = (callback: () => void) => {
 export const withEnqueue = (fn: AnyFunction) => {
   // 여기를 구현하세요.
   // scheduled 플래그를 사용하여 fn이 한 번만 예약되도록 구현합니다.
-  return () => {};
+  let scheduled = false;
+
+  return () => {
+    if (scheduled) return;
+
+    scheduled = true;
+    enqueue(() => {
+      scheduled = false;
+      fn();
+    });
+  };
 };
