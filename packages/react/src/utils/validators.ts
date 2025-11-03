@@ -8,6 +8,6 @@
 export const isEmptyValue = (value: unknown): boolean => {
   // 여기를 구현하세요.
 
-  const isEmpty = value === null || value === undefined || value === false;
+  const isEmpty = value === null || value === undefined || typeof value === "boolean";
   return isEmpty;
 };

@@ -1,5 +1,6 @@
 import { DependencyList } from "./types";
 import { useMemo } from "./useMemo";
+import type { AnyFunction } from "../types";
 
 /**
  * 함수를 메모이제이션합니다.
@@ -9,8 +10,8 @@ import { useMemo } from "./useMemo";
  * @param deps - 의존성 배열
  * @returns 메모이제이션된 콜백 함수
  */
-export const useCallback = <T extends (...args: any[]) => any>(callback: T, deps: DependencyList): T => {
+export const useCallback = <T extends AnyFunction>(callback: T, deps: DependencyList): T => {
   // 여기를 구현하세요.
   // useMemo를 사용하여 구현할 수 있습니다.
-  return callback;
+  return useMemo(() => callback, deps);
 };

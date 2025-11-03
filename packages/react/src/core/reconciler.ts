@@ -32,9 +32,11 @@ function cleanupInstance(instance: Instance | null): void {
           hook.cleanup();
         }
       }
-      // 상태 제거
-      context.hooks.state.delete(instance.path);
-      context.hooks.cursor.delete(instance.path);
+      // visited에 있으면 다른 컴포넌트가 이 path를 사용하고 있으므로 삭제하지 않음
+      if (!context.hooks.visited.has(instance.path)) {
+        context.hooks.state.delete(instance.path);
+        context.hooks.cursor.delete(instance.path);
+      }
     }
   }
 
@@ -193,8 +195,9 @@ export const reconcile = (
 
   // 4-1. Component 업데이트
   if (typeof node.type === "function") {
-    context.hooks.componentStack.push(instance.path);
-    context.hooks.visited.add(instance.path);
+    // Hook 상태는 이미 reconcile 전에 이동되었음 (Fragment/HOST UPDATE의 2단계)
+    context.hooks.componentStack.push(path); // 새 path 사용
+    context.hooks.visited.add(path); // 새 path 사용
 
     try {
       // 컴포넌트 재실행
@@ -206,13 +209,14 @@ export const reconcile = (
         parentDom,
         oldChildInstance,
         childNode,
-        oldChildInstance?.path || createChildPath(instance.path, null, 0, childNode?.type),
+        oldChildInstance?.path || createChildPath(path, null, 0, childNode?.type),
       );
 
       return {
         ...instance,
         node,
         children: childInstance ? [childInstance] : [],
+        path, // path 업데이트
       };
     } finally {
       context.hooks.componentStack.pop();
@@ -242,18 +246,27 @@ export const reconcile = (
 
     // key 기반 매칭을 위한 맵 생성
     const oldChildrenByKey = new Map<string, Instance>();
+    const oldChildrenByTypeAndIndex = new Map<string | symbol | React.ComponentType, Instance[]>();
     const usedOldChildren = new Set<Instance>();
 
     for (const oldChild of oldChildren) {
       if (oldChild && oldChild.key !== null) {
         oldChildrenByKey.set(oldChild.key, oldChild);
+      } else if (oldChild) {
+        // key가 없는 경우 type별로 그룹화
+        const type = oldChild.node.type;
+        if (!oldChildrenByTypeAndIndex.has(type)) {
+          oldChildrenByTypeAndIndex.set(type, []);
+        }
+        oldChildrenByTypeAndIndex.get(type)!.push(oldChild);
       }
     }
 
-    const children: (Instance | null)[] = [];
-    let oldChildIndexForNonKeyed = 0;
+    const typeIndexCounters = new Map<string | symbol | React.ComponentType, number>();
 
-    // 새 children 순회 (key 기반 매칭)
+    // 1단계: 매칭 및 path 계산
+    const reconcileQueue: Array<{ oldChild: Instance | null; newChild: VNode; childPath: string }> = [];
+
     for (let i = 0; i < newChildren.length; i++) {
       const newChild = newChildren[i];
       let oldChild: Instance | null = null;
@@ -264,32 +277,52 @@ export const reconcile = (
         if (oldChild) {
           usedOldChildren.add(oldChild);
         }
-      } else {
-        // key가 없으면 type과 index 기반으로 매칭
-        while (oldChildIndexForNonKeyed < oldChildren.length) {
-          const candidate = oldChildren[oldChildIndexForNonKeyed];
-          oldChildIndexForNonKeyed++;
-          if (
-            candidate &&
-            candidate.key === null &&
-            !usedOldChildren.has(candidate) &&
-            candidate.node.type === newChild?.type
-          ) {
+      } else if (newChild) {
+        // key가 없으면 같은 type 중에서 아직 사용되지 않은 것 매칭
+        const type = newChild.type;
+        const sameTypeOldChildren = oldChildrenByTypeAndIndex.get(type) || [];
+        const currentTypeIndex = typeIndexCounters.get(type) || 0;
+
+        // 같은 type 중에서 아직 사용되지 않은 첫 번째 것 찾기
+        for (let j = currentTypeIndex; j < sameTypeOldChildren.length; j++) {
+          const candidate = sameTypeOldChildren[j];
+          if (!usedOldChildren.has(candidate)) {
             oldChild = candidate;
             usedOldChildren.add(candidate);
+            typeIndexCounters.set(type, j + 1);
             break;
           }
         }
       }
 
-      // 재조정
-      const childInstance = reconcile(
-        parentDom,
-        oldChild,
-        newChild,
-        oldChild?.path || createChildPath(path, newChild?.key, i, newChild?.type, newChildren),
-      );
+      // key가 있고 oldChild가 있으면 oldChild의 path 유지 (hook 상태 보존)
+      // key가 없으면 항상 새로운 path 생성 (인덱스 기반, path 충돌 방지)
+      const childPath =
+        newChild?.key !== null && newChild?.key !== undefined && oldChild
+          ? oldChild.path
+          : createChildPath(path, newChild?.key, i, newChild?.type, newChildren);
 
+      reconcileQueue.push({ oldChild, newChild, childPath });
+    }
+
+    // 2단계: hook 상태 이동 (COMPONENT UPDATE 케이스, reconcile 전에 먼저 처리)
+    for (const { oldChild, childPath } of reconcileQueue) {
+      if (oldChild && oldChild.kind === NodeTypes.COMPONENT && oldChild.path !== childPath) {
+        const hooks = context.hooks.state.get(oldChild.path);
+        if (hooks) {
+          context.hooks.state.set(childPath, hooks);
+          context.hooks.state.delete(oldChild.path);
+        }
+        // cursor는 이동하지 않음 - 렌더링 시 0부터 시작해야 함
+        // 대신 old path의 cursor는 삭제
+        context.hooks.cursor.delete(oldChild.path);
+      }
+    }
+
+    // 3단계: reconcile
+    const children: (Instance | null)[] = [];
+    for (const { oldChild, newChild, childPath } of reconcileQueue) {
+      const childInstance = reconcile(parentDom, oldChild, newChild, childPath);
       children.push(childInstance);
     }
 
@@ -343,18 +376,27 @@ export const reconcile = (
 
     // key 기반 매칭을 위한 맵 생성
     const oldChildrenByKey = new Map<string, Instance>();
+    const oldChildrenByTypeAndIndex = new Map<string | symbol | React.ComponentType, Instance[]>();
     const usedOldChildren = new Set<Instance>();
 
     for (const oldChild of oldChildren) {
       if (oldChild && oldChild.key !== null) {
         oldChildrenByKey.set(oldChild.key, oldChild);
+      } else if (oldChild) {
+        // key가 없는 경우 type별로 그룹화
+        const type = oldChild.node.type;
+        if (!oldChildrenByTypeAndIndex.has(type)) {
+          oldChildrenByTypeAndIndex.set(type, []);
+        }
+        oldChildrenByTypeAndIndex.get(type)!.push(oldChild);
       }
     }
 
-    const children: (Instance | null)[] = [];
-    let oldChildIndexForNonKeyed = 0;
+    const typeIndexCounters = new Map<string | symbol | React.ComponentType, number>();
 
-    // 새 children 순회 (key 기반 매칭)
+    // 1단계: 매칭 및 path 계산
+    const reconcileQueue: Array<{ oldChild: Instance | null; newChild: VNode; childPath: string }> = [];
+
     for (let i = 0; i < newChildren.length; i++) {
       const newChild = newChildren[i];
       let oldChild: Instance | null = null;
@@ -365,32 +407,52 @@ export const reconcile = (
         if (oldChild) {
           usedOldChildren.add(oldChild);
         }
-      } else {
-        // key가 없으면 type과 index 기반으로 매칭
-        while (oldChildIndexForNonKeyed < oldChildren.length) {
-          const candidate = oldChildren[oldChildIndexForNonKeyed];
-          oldChildIndexForNonKeyed++;
-          if (
-            candidate &&
-            candidate.key === null &&
-            !usedOldChildren.has(candidate) &&
-            candidate.node.type === newChild?.type
-          ) {
+      } else if (newChild) {
+        // key가 없으면 같은 type 중에서 아직 사용되지 않은 것 매칭
+        const type = newChild.type;
+        const sameTypeOldChildren = oldChildrenByTypeAndIndex.get(type) || [];
+        const currentTypeIndex = typeIndexCounters.get(type) || 0;
+
+        // 같은 type 중에서 아직 사용되지 않은 첫 번째 것 찾기
+        for (let j = currentTypeIndex; j < sameTypeOldChildren.length; j++) {
+          const candidate = sameTypeOldChildren[j];
+          if (!usedOldChildren.has(candidate)) {
             oldChild = candidate;
             usedOldChildren.add(candidate);
+            typeIndexCounters.set(type, j + 1);
             break;
           }
         }
       }
 
-      // 재조정
-      const childInstance = reconcile(
-        instance.dom as HTMLElement,
-        oldChild,
-        newChild,
-        oldChild?.path || createChildPath(path, newChild?.key, i, newChild?.type, newChildren),
-      );
+      // key가 있고 oldChild가 있으면 oldChild의 path 유지 (hook 상태 보존)
+      // key가 없으면 항상 새로운 path 생성 (인덱스 기반, path 충돌 방지)
+      const childPath =
+        newChild?.key !== null && newChild?.key !== undefined && oldChild
+          ? oldChild.path
+          : createChildPath(path, newChild?.key, i, newChild?.type, newChildren);
 
+      reconcileQueue.push({ oldChild, newChild, childPath });
+    }
+
+    // 2단계: hook 상태 이동 (COMPONENT UPDATE 케이스, reconcile 전에 먼저 처리)
+    for (const { oldChild, childPath } of reconcileQueue) {
+      if (oldChild && oldChild.kind === NodeTypes.COMPONENT && oldChild.path !== childPath) {
+        const hooks = context.hooks.state.get(oldChild.path);
+        if (hooks) {
+          context.hooks.state.set(childPath, hooks);
+          context.hooks.state.delete(oldChild.path);
+        }
+        // cursor는 이동하지 않음 - 렌더링 시 0부터 시작해야 함
+        // 대신 old path의 cursor는 삭제
+        context.hooks.cursor.delete(oldChild.path);
+      }
+    }
+
+    // 3단계: reconcile
+    const children: (Instance | null)[] = [];
+    for (const { oldChild, newChild, childPath } of reconcileQueue) {
+      const childInstance = reconcile(instance.dom as HTMLElement, oldChild, newChild, childPath);
       children.push(childInstance);
     }
 

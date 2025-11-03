@@ -8,5 +8,5 @@ import { useMemo } from "./useMemo";
 export const useDeepMemo = <T>(factory: () => T, deps: DependencyList): T => {
   // 여기를 구현하세요.
   // useMemo와 deepEquals 함수를 사용해야 합니다.
-  return factory();
+  return useMemo(factory, deps, deepEquals);
 };
